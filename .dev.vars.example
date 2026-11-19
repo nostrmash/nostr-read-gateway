@@ -1,0 +1,5 @@
+ENVIRONMENT=development
+UPSTREAMS=[{"name":"primary","type":"primal_ws","url":"wss://cache.example/v1","priority":1}]
+# READ_GATEWAY_TOKEN=
+# REQUIRE_AUTH=false
+# GATEWAY_BUDGET_MS=20000

@@ -1,0 +1,9 @@
+name = "nostrmash-nostr-read-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-11-17"
+
+# No upstream is configured here on purpose. Set UPSTREAMS in .dev.vars
+# or with wrangler secret/vars for the environment you operate.
+# Do not deploy this file over smartflowsocial-primal-cache-worker.
+[vars]
+ENVIRONMENT = "production"
