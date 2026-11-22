@@ -73,6 +73,12 @@ A successful body is a Primal-style list of `EVENT` frames ending in `EOSE`. Hea
 
 An authoritative empty result is HTTP 200 with only `EOSE`. The gateway does not ask the next upstream after that.
 
+## Health
+
+`GET /health` checks configuration only. It does not open an upstream.
+
+`GET /health/deep` runs one `net_stats` request with a three-second deadline. An authoritative empty result, including a response that contains only `EOSE`, is success. HTTP 503 means every configured upstream failed or the gateway is misconfigured. The probe does not require NostrMash or SmartFlowSocial.
+
 ## Deploy
 
 CI does not deploy. The script name is `nostrmash-nostr-read-gateway`. Confirm it is free in your Cloudflare account before the first deploy. Do not reuse `smartflowsocial-primal-cache-worker`.
