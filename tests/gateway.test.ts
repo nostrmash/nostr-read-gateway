@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
 
 import { REQUEST_TYPE_COUNT } from "../src/request-types";
+import { resetDeepHealthState } from "../src/deep-health";
 import { handleFetch } from "../src/index";
 import type { GatewayEnv } from "../src/types";
 import { FakeSocket, frames } from "./fake-socket";
@@ -13,6 +14,7 @@ const EVENT_ID = "ab".repeat(32);
 const servers: WebSocketServer[] = [];
 
 afterEach(async () => {
+  resetDeepHealthState();
   FakeSocket.reset();
   await Promise.all(
     servers
@@ -59,7 +61,13 @@ describe("configuration", () => {
       { webSocket: FakeSocket },
     );
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ status: "ok", empty: true, upstream: "cache" });
+    expect(await response.json()).toMatchObject({
+      status: "ok",
+      empty: true,
+      upstream: "cache",
+      requestType: "net_stats",
+      data: "not_proven",
+    });
   });
 
   it("reports /health/deep down when the upstream socket fails", async () => {
@@ -414,5 +422,212 @@ describe("simulated provider socket", () => {
     const body = (await response.json()) as unknown[][];
     expect(body[0]?.[0]).toBe("EVENT");
     expect(body[1]?.[0]).toBe("EOSE");
+  });
+});
+
+const httpUpstream = {
+  name: "index",
+  type: "nostrmash_http",
+  url: "https://index.example",
+  priority: 1,
+};
+
+describe("deep health authentication and capability", () => {
+  it("fails closed in production until HEALTH_PROBE_TOKEN is set and does not call upstream", async () => {
+    let called = false;
+    const response = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      env([httpUpstream], { ENVIRONMENT: "production" }),
+      {
+        fetchImpl: async () => {
+          called = true;
+          return new Response(null, { status: 404 });
+        },
+      },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "probe_auth_not_configured" });
+    expect(called).toBe(false);
+    const health = await handleFetch(
+      new Request("https://gateway.example/health"),
+      env([httpUpstream], { ENVIRONMENT: "production" }),
+    );
+    expect(health.status).toBe(200);
+  });
+
+  it("rejects a missing or wrong bearer before opening an upstream", async () => {
+    let called = false;
+    const configured = env([httpUpstream], { HEALTH_PROBE_TOKEN: "probe-secret" });
+    const fetchImpl = async () => {
+      called = true;
+      return new Response(null, { status: 404 });
+    };
+    const missing = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      configured,
+      { fetchImpl },
+    );
+    const wrong = await handleFetch(
+      new Request("https://gateway.example/health/deep", {
+        headers: { authorization: "Bearer nope" },
+      }),
+      configured,
+      { fetchImpl },
+    );
+    expect(missing.status).toBe(401);
+    expect(wrong.status).toBe(401);
+    expect(called).toBe(false);
+  });
+
+  it("probes an HTTP-only upstream with a supported profile read", async () => {
+    const urls: string[] = [];
+    const response = await handleFetch(
+      new Request("https://gateway.example/health/deep", {
+        headers: { authorization: "Bearer probe-secret" },
+      }),
+      env([httpUpstream], { ENVIRONMENT: "production", HEALTH_PROBE_TOKEN: "probe-secret" }),
+      {
+        fetchImpl: async (input) => {
+          urls.push(String(input));
+          return new Response(null, { status: 404 });
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { requestType: string; empty: boolean; data: string };
+    expect(body.requestType).toBe("user_profile");
+    expect(body.empty).toBe(true);
+    expect(body.data).toBe("not_proven");
+    expect(urls[0]).toContain(`/api/v1/users/${"0".repeat(64)}/summary`);
+  });
+
+  it("uses a configured event fixture and falls back when the first upstream fails", async () => {
+    const eventId = "ab".repeat(32);
+    let calls = 0;
+    const response = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      env(
+        [
+          { ...httpUpstream, name: "primary", priority: 1 },
+          { ...httpUpstream, name: "secondary", url: "https://backup.example", priority: 2 },
+        ],
+        { HEALTH_PROBE_EVENT_ID: eventId },
+      ),
+      {
+        fetchImpl: async (input) => {
+          calls += 1;
+          if (String(input).includes("index.example")) throw new Error("down");
+          return new Response(JSON.stringify({ events: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      upstream: "secondary",
+      requestType: "events",
+      fallbackCount: 1,
+      empty: true,
+    });
+    expect(calls).toBe(2);
+  });
+
+  it("does not repeat an upstream probe while the result is cached", async () => {
+    let calls = 0;
+    const start = Date.now();
+    const configured = env([httpUpstream], { HEALTH_PROBE_CACHE_MS: "60000" });
+    const deps = {
+      now: () => start,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response("not-json", { status: 200 });
+      },
+    };
+    const first = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      configured,
+      deps,
+    );
+    const second = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      configured,
+      deps,
+    );
+    expect(first.status).toBe(503);
+    expect(await first.json()).toMatchObject({ status: "down", code: "malformed_upstream" });
+    expect(second.status).toBe(503);
+    expect(await second.json()).toMatchObject({ cached: true });
+    expect(calls).toBe(1);
+    const expired = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      configured,
+      {
+        ...deps,
+        now: () => start + 70_000,
+      },
+    );
+    expect(expired.status).toBe(503);
+    expect(calls).toBe(2);
+  });
+
+  it("rate limits probes that are not served from cache", async () => {
+    let calls = 0;
+    const configured = env([httpUpstream], { HEALTH_PROBE_LIMIT: "1", HEALTH_PROBE_CACHE_MS: "0" });
+    const deps = {
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(null, { status: 404 });
+      },
+    };
+    const first = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      configured,
+      deps,
+    );
+    const second = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      configured,
+      deps,
+    );
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(429);
+    expect(calls).toBe(1);
+  });
+
+  it("shares one upstream call across concurrent authorized probes", async () => {
+    let calls = 0;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const configured = env([httpUpstream], { HEALTH_PROBE_TOKEN: "probe-secret" });
+    const deps = {
+      fetchImpl: async () => {
+        calls += 1;
+        await gate;
+        return new Response(null, { status: 404 });
+      },
+    };
+    const headers = { authorization: "Bearer probe-secret" };
+    const pending = Promise.all([
+      handleFetch(
+        new Request("https://gateway.example/health/deep", { headers }),
+        configured,
+        deps,
+      ),
+      handleFetch(
+        new Request("https://gateway.example/health/deep", { headers }),
+        configured,
+        deps,
+      ),
+    ]);
+    await Promise.resolve();
+    release();
+    const [first, second] = await pending;
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(calls).toBe(1);
   });
 });
