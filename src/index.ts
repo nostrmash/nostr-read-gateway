@@ -1,4 +1,6 @@
 import { allowLocalUpstreams, parseUpstreams } from "./config";
+import { runDeepHealth } from "./deep-health";
+import { authorizeProbe } from "./probe-auth";
 import { isRequestType } from "./request-types";
 import { routeQuery } from "./router";
 import type { GatewayEnv, QueryDependencies } from "./types";
@@ -97,49 +99,6 @@ async function readBody(request: Request): Promise<Uint8Array> {
   return body;
 }
 
-async function deepHealth(
-  parsed: ReturnType<typeof parseUpstreams>,
-  deps: QueryDependencies,
-  trace: string,
-): Promise<Response> {
-  if (!parsed.ok) {
-    return json(
-      503,
-      {
-        status: "misconfigured",
-        error: parsed.reason,
-        code:
-          parsed.reason === "upstreams_not_configured"
-            ? "upstreams_not_configured"
-            : "invalid_upstream_configuration",
-      },
-      trace,
-    );
-  }
-  const decision = await routeQuery(
-    parsed.upstreams,
-    { requestType: "net_stats", traceId: trace, deadline: Date.now() + 3_000 },
-    deps,
-  );
-  if (!decision.ok) {
-    return json(
-      503,
-      { status: "down", code: decision.code, attempts: decision.attempts.length },
-      trace,
-    );
-  }
-  return json(
-    200,
-    {
-      status: "ok",
-      upstream: decision.upstream.name,
-      empty: !decision.messages.some((message) => Array.isArray(message) && message[0] === "EVENT"),
-      fallbackCount: decision.fallbackCount,
-    },
-    trace,
-  );
-}
-
 function budget(env: GatewayEnv): number {
   const parsed = Number(env.GATEWAY_BUDGET_MS);
   if (!Number.isInteger(parsed)) return 20_000;
@@ -188,7 +147,43 @@ export async function handleFetch(
     );
   }
   if (request.method === "GET" && path === "/health/deep") {
-    return deepHealth(parsed, deps, trace);
+    const auth = await authorizeProbe(request, env);
+    if (!auth.ok) {
+      return json(
+        auth.status,
+        {
+          error:
+            auth.code === "probe_auth_not_configured"
+              ? "HEALTH_PROBE_TOKEN is required"
+              : "Authentication failed",
+          code: auth.code,
+        },
+        trace,
+      );
+    }
+    if (!parsed.ok) {
+      return json(
+        503,
+        {
+          status: "misconfigured",
+          error: parsed.reason,
+          code:
+            parsed.reason === "upstreams_not_configured"
+              ? "upstreams_not_configured"
+              : "invalid_upstream_configuration",
+        },
+        trace,
+      );
+    }
+    const now = deps.now ?? Date.now;
+    const probe = await runDeepHealth({
+      env,
+      upstreams: parsed.upstreams,
+      deps,
+      trace,
+      now: now(),
+    });
+    return json(probe.status, probe.body, trace);
   }
   if (request.method !== "POST" || (path !== "/" && path !== "/query")) {
     return json(404, { error: "not_found", code: "not_found" }, trace);

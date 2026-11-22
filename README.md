@@ -75,9 +75,9 @@ An authoritative empty result is HTTP 200 with only `EOSE`. The gateway does not
 
 ## Health
 
-`GET /health` checks configuration only. It does not open an upstream.
+`GET /health` checks configuration only. It does not open an upstream and does not require a token.
 
-`GET /health/deep` runs one `net_stats` request with a three-second deadline. An authoritative empty result, including a response that contains only `EOSE`, is success. HTTP 503 means every configured upstream failed or the gateway is misconfigured. The probe does not require NostrMash or SmartFlowSocial.
+`GET /health/deep` is a bounded functional probe. In production it requires `HEALTH_PROBE_TOKEN` as `Authorization: Bearer` before any upstream connection. Development and test allow it only when that token is unset. The token is a Worker secret, not the query API token. The probe picks `net_stats` for a socket upstream and a supported profile or event read for a NostrMash HTTP upstream. An empty result means the upstream completed the request. It does not mean the upstream has indexed data. Set `HEALTH_PROBE_PUBKEY` or `HEALTH_PROBE_EVENT_ID` when you want a known fixture. The rate limit and result cache are per isolate, not global.
 
 ## Deploy
 

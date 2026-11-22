@@ -39,6 +39,15 @@ export interface GatewayEnv {
   REQUIRE_AUTH?: string;
   READ_GATEWAY_TOKEN?: string;
   GATEWAY_BUDGET_MS?: string;
+  /** Dedicated secret for GET /health/deep. Not the query API token. */
+  HEALTH_PROBE_TOKEN?: string;
+  /** Optional 64-hex profile used by an HTTP upstream probe. Not a customer identity. */
+  HEALTH_PROBE_PUBKEY?: string;
+  /** Optional 64-hex event id used when no profile fixture is set. */
+  HEALTH_PROBE_EVENT_ID?: string;
+  HEALTH_PROBE_LIMIT?: string;
+  HEALTH_PROBE_WINDOW_MS?: string;
+  HEALTH_PROBE_CACHE_MS?: string;
 }
 
 export interface QueryDependencies {
