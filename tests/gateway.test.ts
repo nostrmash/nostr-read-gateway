@@ -42,6 +42,46 @@ describe("configuration", () => {
     expect(REQUEST_TYPE_COUNT).toBe(89);
   });
 
+  it("probes one upstream on /health/deep and accepts an authoritative empty result", async () => {
+    FakeSocket.queue.push((socket) => frames(socket, [["EOSE"]]));
+    const response = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      env([
+        {
+          name: "cache",
+          type: "primal_ws",
+          url: "wss://cache.example/v1",
+          priority: 1,
+          connectTimeoutMs: 200,
+          responseTimeoutMs: 200,
+        },
+      ]),
+      { webSocket: FakeSocket },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "ok", empty: true, upstream: "cache" });
+  });
+
+  it("reports /health/deep down when the upstream socket fails", async () => {
+    FakeSocket.queue.push((socket) => socket.emit("error", new Event("error")));
+    const response = await handleFetch(
+      new Request("https://gateway.example/health/deep"),
+      env([
+        {
+          name: "cache",
+          type: "primal_ws",
+          url: "wss://cache.example/v1",
+          priority: 1,
+          connectTimeoutMs: 80,
+          responseTimeoutMs: 80,
+        },
+      ]),
+      { webSocket: FakeSocket },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ status: "down" });
+  });
+
   it("fails closed when no upstreams are configured", async () => {
     const response = await handleFetch(post({ requestType: "net_stats" }), {
       ENVIRONMENT: "production",
