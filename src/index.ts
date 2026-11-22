@@ -133,9 +133,7 @@ async function deepHealth(
     {
       status: "ok",
       upstream: decision.upstream.name,
-      empty: !decision.messages.some(
-        (message) => Array.isArray(message) && message[0] === "EVENT",
-      ),
+      empty: !decision.messages.some((message) => Array.isArray(message) && message[0] === "EVENT"),
       fallbackCount: decision.fallbackCount,
     },
     trace,
